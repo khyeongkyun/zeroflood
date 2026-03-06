@@ -102,6 +102,7 @@ def main(cfg: DictConfig) -> None:
 
     else:
         exp_dir = pathlib.Path(cfg.ckpt_dir)
+        save_pred = cfg.save_pred
         exp_name = exp_dir.name
         logger_path = exp_dir / "test.log"
         # load training config
@@ -286,7 +287,8 @@ def main(cfg: DictConfig) -> None:
         collate_fn=collate_fn,
     )
     test_evaluator: Evaluator = instantiate(
-        cfg.task.evaluator, val_loader=test_loader, exp_dir=exp_dir, device=device
+        cfg.task.evaluator, val_loader=test_loader, exp_dir=exp_dir, device=device, 
+        save_pred=save_pred,
     )
 
     if cfg.use_final_ckpt:

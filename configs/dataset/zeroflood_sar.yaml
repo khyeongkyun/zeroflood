@@ -1,0 +1,43 @@
+_target_: pangaea.datasets.zeroflood.ZeroFlood
+dataset_name: ZeroFlood
+root_path: ./data/ZeroFlood
+download_url: None
+auto_download: False
+
+img_size: 264
+multi_temporal: False
+multi_modal: False
+
+constant_scale: 1
+ignore_index: -1
+num_classes: 2
+classes:
+  - 'null'
+  - 'flood_rp10'
+distribution:
+  - 0.66
+  - 0.34
+
+bands:
+  sar:
+    - VV
+    - VH
+
+data_mean:
+  sar:
+    - -11.75303324
+    - -17.50780573
+data_std:
+  sar:
+    - 5.03739141
+    - 4.57518098
+
+
+data_max:
+  sar:
+    - 42.3125
+    - 40.8125
+data_min:
+  sar:
+    - -56.15625
+    - -61.3125

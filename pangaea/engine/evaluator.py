@@ -15,6 +15,27 @@ from pangaea.decoders.knnclassifier import KNNClassifier
 from tqdm import tqdm
 
 
+# EDITTED: ---------------------------------------------------------------
+
+import xarray as xr
+import zarr
+
+def save_to_zarr(data, out_dir):
+    ds = xr.Dataset(
+        data_vars={
+            "bands": (("band", "y", "x"), data),
+        },
+    )
+
+    store = zarr.storage.ZipStore(f"{out_dir}.zip", mode="w")
+    ds.to_zarr(
+        store, 
+        mode="w", 
+        consolidated=True
+        )
+    store.close()
+
+
 class Evaluator:
     """
     Evaluator class for evaluating the models.
@@ -51,6 +72,7 @@ class Evaluator:
             inference_mode: str = 'sliding',
             sliding_inference_batch: int = None,
             use_wandb: bool = False,
+            save_pred: bool = False,
     ) -> None:
         self.rank = int(os.environ["RANK"])
         self.val_loader = val_loader
@@ -65,6 +87,7 @@ class Evaluator:
         self.num_classes = len(self.classes)
         self.max_name_len = max([len(name) for name in self.classes])
         self.use_wandb = use_wandb
+        self.save_pred = save_pred
         
         # Compute valid class indices (excluding ignore index)
         self.valid_class_indices = [
@@ -92,7 +115,6 @@ class Evaluator:
     @staticmethod
     def sliding_inference(model, img, input_size, output_shape=None, stride=None, max_batch=None):
         b, c, t, height, width = img[list(img.keys())[0]].shape
-
         if stride is None:
             h = int(math.ceil(height / input_size))
             w = int(math.ceil(width / input_size))
@@ -408,8 +430,9 @@ class SegEvaluator(Evaluator):
             inference_mode: str = 'sliding',
             sliding_inference_batch: int = None,
             use_wandb: bool = False,
+            save_pred: bool = False,
     ):
-        super().__init__(val_loader, exp_dir, device, inference_mode, sliding_inference_batch, use_wandb)
+        super().__init__(val_loader, exp_dir, device, inference_mode, sliding_inference_batch, use_wandb, save_pred)
 
     @torch.no_grad()
     def evaluate(self, model, model_name='model', model_ckpt_path=None):
@@ -449,6 +472,13 @@ class SegEvaluator(Evaluator):
                 pred = (torch.sigmoid(logits) > 0.5).type(torch.int64).squeeze(dim=1)
             else:
                 pred = torch.argmax(logits, dim=1)
+            
+            if self.save_pred:
+                pred_out_dir = Path(self.exp_dir) / "PRED"
+                pred_out_dir.mkdir(exist_ok=True)
+                pred_out_dir = pred_out_dir / Path(data['metadata'][0]['filename']).name.removesuffix(".zip")
+                save_to_zarr(pred.cpu(), pred_out_dir)
+
             valid_mask = target != self.ignore_index
             pred, target = pred[valid_mask], target[valid_mask]
             count = torch.bincount(

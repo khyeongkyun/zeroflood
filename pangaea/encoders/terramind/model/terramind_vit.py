@@ -1,34 +1,32 @@
-import logging
-import random
-from pathlib import Path
-import torch
-from einops import rearrange
+# Copyright 2025 IBM Corp.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import math
+import random
+import warnings
+
+import torch
+from torch import nn
 from functools import partial
-from logging import Logger
-import torch.nn as nn
 
-from pangaea.encoders.base import Encoder
+from .encoder_embeddings import ImageEncoderEmbedding, ImageTokenEncoderEmbedding
+from .tm_utils import Block, LayerNorm
+from .modality_info import MODALITY_INFO
+from .terramind import build_modality_embeddings, build_tokenizer
 
-from pangaea.encoders.terramind.model.terramind import(
-    build_modality_embeddings,Block, LayerNorm,
-)
 
-from pangaea.encoders.terramind.model.encoder_embeddings import(
-    ImageEncoderEmbedding
-)
-
-from pangaea.encoders.terramind.model.terramind_register import(
-    PRETRAINED_BANDS, select_modality_patch_embed_weights
-)
-
-from pangaea.encoders.terramind.model.modality_info import(
-    MODALITY_INFO
-)
-
-logger = logging.getLogger('terramind')
-
-class TerraMindViT(Encoder):
+class TerraMindViT(nn.Module):
     """Modified TerraMind model, adapted to behave as a raw data-only ViT.
 
     Args:
@@ -48,6 +46,7 @@ class TerraMindViT(Encoder):
         qkv_bias (bool): If True, add a learnable bias to query, key, value.
         proj_bias (bool): If True, adds a bias to the attention out proj layer.
         mlp_bias (bool): If True, adds a learnable bias for the feedforward.
+        num_register_tokens (int): Number of register tokens.
         drop_path_rate (float): Stochastic depth rate.
         drop_rate (float): Dropout rate.
         attn_drop_rate (float): Attention dropout rate.
@@ -56,22 +55,12 @@ class TerraMindViT(Encoder):
         norm_layer (nn.Module): Normalization layer.
         gated_mlp (bool): If True, makes the feedforward gated (e.g., for SwiGLU)
         qk_norm (bool): If True, normalizes the query and keys (as in ViT-22B)
-        use_act_checkpoint (bool): If True, use activation checkpointing.
         encoder_norm (bool): If True, adds a norm layer after the last encoder block.
+        tokenizer_dict (dict): Dictionary of tokenizers.
+        pretrained (bool): If True, loads pretrained tokenizers.
     """
     def __init__(
         self,
-
-        # newww
-        encoder_weights: str | Path,
-        input_size: int,
-        input_bands: dict[str, list[str]],
-        output_layers: int | list[int],
-        output_dim: int | list[int],
-        download_url: str,
-
-        # old
-        encoder_norm: bool = True,
         img_size: int = 224,
         modalities: list | dict[str, int | nn.Module] | None = None,
         merge_method: str | None = 'mean',
@@ -84,6 +73,7 @@ class TerraMindViT(Encoder):
         qkv_bias: bool = True,
         proj_bias: bool = True,
         mlp_bias: bool = True,
+        num_register_tokens: int = 0,
         drop_path_rate: float = 0.0,
         drop_rate: float = 0.0,
         attn_drop_rate: float = 0.0,
@@ -92,22 +82,12 @@ class TerraMindViT(Encoder):
         norm_layer: partial | nn.Module = partial(LayerNorm, eps=1e-6),
         gated_mlp: bool = False,  # Make the feedforward gated for e.g. SwiGLU
         qk_norm: bool = False,
+        encoder_norm: bool = True,
+        tokenizer_dict: dict | None = None,
+        pretrained: bool = False,
     ):
-        super().__init__(        # newww
-        model_name = "terramind",
-        input_bands = input_bands,
-        input_size = input_size,
-        embed_dim = dim,
-        output_layers = output_layers,
-        output_dim = output_dim ,
-        multi_temporal = False,
-        multi_temporal_output = False,
-        pyramid_output = False,
-        encoder_weights = encoder_weights,
-        download_url = download_url,
-        )
-       
-        modalities = list(modalities)
+        super().__init__()
+
         if modalities is None or len(modalities) == 0:
             # Init new image modality
             modalities = [{'image': in_chans}]
@@ -117,21 +97,20 @@ class TerraMindViT(Encoder):
             raise ValueError(f'Modalities must be None, a list of modality keys or a dict with ints/embedding layers.')
 
         # Build embedding layers for all defined modalities
-        mod_embeddings, mod_name_mapping = build_modality_embeddings(MODALITY_INFO, modalities, img_size, dim, patch_size)
-
+        mod_embeddings, mod_name_mapping = build_modality_embeddings(MODALITY_INFO, modalities, img_size=img_size,
+                                                                     dim=dim, patch_size=patch_size)
         self.encoder_embeddings = nn.ModuleDict(mod_embeddings)
         self.mod_name_mapping = mod_name_mapping
         self.modalities = list(mod_name_mapping.keys())  # Further code expects list
-        self.patch_size = patch_size
 
         self.img_size = img_size
         self.merge_method = merge_method
         self.image_modalities = [key for key, value in self.encoder_embeddings.items()
-                                 if isinstance(value, ImageEncoderEmbedding)]
+             if isinstance(value, ImageEncoderEmbedding) or isinstance(value, ImageTokenEncoderEmbedding)]
         self.modality_drop_rate = modality_drop_rate
         assert 0 <= self.modality_drop_rate <= 1, "modality_drop_rate must be in [0, 1]"
         # New learned parameter for handling missing modalities
-        if modality_drop_rate and self.merge_method == 'concat':
+        if self.merge_method == 'concat':
             self.missing_mod_token = nn.Parameter(torch.Tensor(dim))
 
         # stochastic depth decay rule
@@ -151,6 +130,22 @@ class TerraMindViT(Encoder):
             self.out_channels = [dim for i in range(encoder_depth)]
 
         self.encoder_norm = norm_layer(dim) if encoder_norm else nn.Identity()
+
+        # Additional register tokens that can be used by the encoder during fine-tuning
+        self.num_register_tokens = num_register_tokens
+        if self.num_register_tokens > 0:
+            self.register_tokens = nn.Parameter(torch.zeros(1, self.num_register_tokens, dim))
+            nn.init.normal_(self.register_tokens, std=0.02)
+        else:
+            self.register_tokens = None
+
+        # Init optional tokenizers
+        if tokenizer_dict is not None:
+            self.tokenizer = build_tokenizer(tokenizer_dict=tokenizer_dict,
+                                             input_modalities=list(self.encoder_embeddings.keys()),
+                                             pretrained=pretrained)
+        else:
+            self.tokenizer = {}
 
         # Weight init
         self.init_weights()
@@ -203,7 +198,7 @@ class TerraMindViT(Encoder):
 
         return no_wd_set
 
-    def forward(self, image: dict[str, torch.Tensor] | torch.Tensor | None = None, **kwargs) -> list[torch.Tensor]:
+    def forward(self, d: dict[str, torch.Tensor] | torch.Tensor | None = None, **kwargs) -> list[torch.Tensor]:
         """
         Forward pass of the model.
 
@@ -215,48 +210,77 @@ class TerraMindViT(Encoder):
         Returns:
             list[torch.Tensor]: List of transformer layer outputs. Shape (B, L, D).
         """
-        d = {}
-        if "sar" in image:
-            # EDITTED: S1GRD -> S1RTC
-            d["S1RTC"] = image["sar"].squeeze(2)
-        if "optical" in image:
-            d["S2L2A"] = image["optical"].squeeze(2)
+        # Handle single image modality
+        if not isinstance(d, dict):
+            # Assuming first modality
+            d = {self.modalities[0]: d}
+        elif d is None or len(d) == 0:
+            d = {}
+            if not len(kwargs):
+                raise ValueError("No input provided.")
 
+        # Add additional keyword args to input dict
+        for key, value in kwargs.items():
+            d[key] = value
+
+        # Check for unknown modalities in input
+        for mod in list(d.keys()):
+            if mod not in self.mod_name_mapping:
+                warnings.warn(f"Unknown input modality: {mod}. Ignoring input.")
+                del d[mod]
+        if len(d) == 0:
+            raise ValueError("No valid inputs provided.")
+
+        d_mod = list(d.keys())
         if self.training and self.modality_drop_rate:
             # Drop random modalities during training
-            for key in random.sample(list(d.keys()), k=len(d) - 1):
+            for key in random.sample(d_mod, k=len(d) - 1):
                 if random.random() < self.modality_drop_rate:
                     _ = d.pop(key)
 
-        # NOTE: 1. Patch embedding / Tokenization of all inputs to feed into TerraMind Encoder
         x = []
         num_tokens = []
         image_mod = []
         for mod, tensor in d.items():
-            assert mod in self.mod_name_mapping.keys(), \
-                f'No patch embedding layer found for modality {mod}.'
+            if self.mod_name_mapping[mod] in self.tokenizer:
+                # Tokenize input if required
+                device = next(self.parameters()).device
+                tensor = self.tokenizer[self.mod_name_mapping[mod]].encode(tensor, device)
+                if self.mod_name_mapping[mod] in self.image_modalities:
+                    tensor = tensor[-1]
+                else:
+                    tensor = tensor["tensor"]
 
-            # print(tensor.shape)
-            # print(self.encoder_embeddings[self.mod_name_mapping[mod]])
             mod_dict = self.encoder_embeddings[self.mod_name_mapping[mod]](tensor)
-            # print(mod_dict['x'].shape)
-            # print(mod_dict['emb'].shape)
             # Add embeddings to patchified data
             x.append(mod_dict['x'] + mod_dict['emb'])
             num_tokens.append(mod_dict['x'].shape[-2])
             image_mod.append(self.mod_name_mapping[mod] in self.image_modalities)
+
+        # Concatenate along token dim
         x = torch.cat(x, dim=1)  # Shape: (B, N, D)
 
-        # NOTE: 2. Feed-forward to the TerraMind Encoder blocks
+        if self.num_register_tokens > 0:
+            register_tokens = self.register_tokens.repeat((x.shape[0], 1, 1))
+            # We add register tokens at the beginning of the sequence
+            x = torch.cat([register_tokens, x], dim=1)
+            if self.merge_method == 'dict':
+                # Return register tokens as additional modality
+                d_mod.insert(0, "register_tokens")
+                num_tokens.insert(0, self.num_register_tokens)
+
+        # Forward encoder blocks
         out = []
-        for i, block in enumerate(self.encoder):
+        for block in self.encoder:
             x = block(x)
-            if i in self.output_layers:
-                # NOTE: The output is a list of tensors from the selected transformer layer
-                out.append(x.clone())
+            out.append(x.clone())
+
         out[-1] = self.encoder_norm(x)  # Shape: (B, N, D)
 
         def _unstack_image_modalities(x):
+            if self.num_register_tokens:
+                # Remove register tokens
+                x = x[:, self.num_register_tokens:]
             x = torch.split(x, num_tokens, dim=1)  # Split tokens by modality
             x = [m for m, keep in zip(x, image_mod) if keep]  # Drop sequence modalities
             x = torch.stack(x, dim=1)  # (B, M, N, D)
@@ -266,9 +290,11 @@ class TerraMindViT(Encoder):
         if self.merge_method == 'mean':
             out = [_unstack_image_modalities(x) for x in out]
             out = [x.mean(dim=1) for x in out]
+
         elif self.merge_method == 'max':
             out = [_unstack_image_modalities(x) for x in out]
             out = [x.max(dim=1)[0] for x in out]
+
         elif self.merge_method == 'concat':
             out = [_unstack_image_modalities(x) for x in out]
             if len(d) < len(self.image_modalities):
@@ -278,93 +304,15 @@ class TerraMindViT(Encoder):
                 out = [torch.cat([x, missing_tokens], dim=1) for x in out]
             # Concat along embedding dim
             out = [torch.cat(x.unbind(dim=1), dim=-1) for x in out]
+
         elif self.merge_method == 'dict':
             out = [torch.split(x, num_tokens, dim=1) for x in out]
-            out = [{mod: x[i] for i, mod in enumerate(d.keys())} for x in out]
+            out = [{mod: x[i] for i, mod in enumerate(d_mod)} for x in out]
+
         elif self.merge_method is None:
             pass  # Do nothing
         else:
             raise NotImplementedError(f'Merging method {self.merge_method} is not implemented. '
-                                      f'Select one of mean, max or concat.')
-
-        # NOTE: 3. Shape transition: Token-to-Image for the decoder
-        out = [
-            x.permute(0, 2, 1)
-            .view(
-                x.shape[0],
-                -1,
-                self.img_size // self.patch_size,
-                self.img_size // self.patch_size,
-            )
-            .contiguous()
-            for x in out
-        ]
+                                      f'Select one of mean, max, concat, dict, or None.')
 
         return out
-
-    def load_encoder_weights(self, logger: Logger) -> None:
-        pass
-
-def build_terrammind_vit(
-        variant: str = None,
-        pretrained: bool = False,
-        encoder_weights: str | None = None,
-        bands: dict[str, list] | None = None,
-        pretrained_bands: dict[str, list] | None = None,
-        # output_layers: list = None,
-        **kwargs):
-
-    model = TerraMindViT(
-        encoder_weights=encoder_weights,
-        **kwargs)
-
-    if encoder_weights is not None:
-        # Load model from checkpoint
-        state_dict = torch.load(encoder_weights, map_location="cpu", weights_only=True)
-        loaded_keys = model.load_state_dict(state_dict, strict=False)
-        if loaded_keys.missing_keys:
-            logger.warning(f"Missing keys in encoder_weights {encoder_weights}:\ne.g. 2 samples / {len(loaded_keys.missing_keys)} total. {loaded_keys.missing_keys[:2]}")
-        if loaded_keys.unexpected_keys:
-            logger.warning(f"Missing keys in encoder_weights {encoder_weights}:\ne.g. 2 samples /{len(loaded_keys.unexpected_keys)} total. {loaded_keys.unexpected_keys[:2]}")
-
-    if bands is not None:
-        model = select_modality_patch_embed_weights(model, bands, pretrained_bands)
-
-    return model
-
-def terramind_v1_base(**kwargs):
-    model = build_terrammind_vit(
-        variant='terramind_v1_base',
-        encoder_depth=12,
-        dim=768,
-        num_heads=12,
-        mlp_ratio=4,
-        qkv_bias=False,
-        proj_bias=False,
-        mlp_bias=False,
-        norm_layer=partial(LayerNorm, eps=1e-6, bias=False),
-        act_layer=nn.SiLU,
-        gated_mlp=True,
-        pretrained_bands=PRETRAINED_BANDS,
-        **kwargs
-    )
-    return model
-
-def terramind_v1_large(**kwargs):
-    model = build_terrammind_vit(
-        variant='terramind_v1_large',
-        encoder_depth=24,
-        dim=1024,
-        num_heads=16,
-        mlp_ratio=4,
-        qkv_bias=False,
-        proj_bias=False,
-        mlp_bias=False,
-        norm_layer=partial(LayerNorm, eps=1e-6, bias=False),
-        act_layer=nn.SiLU,
-        gated_mlp=True,
-        pretrained_bands=PRETRAINED_BANDS,
-        **kwargs
-    )
-    return model
-

@@ -4,6 +4,10 @@
 [![HuggingFace](https://img.shields.io/badge/Hugging_Face-IBM--ESA--Geospaital-FFD21E?logo=huggingface)](https://huggingface.co/ibm-esa-geospatial)
 [![Examples](https://img.shields.io/badge/GitHub-Examples-0F62FE?logo=github)](https://github.com/IBM/terramind)
 
+```
+Source from https://github.com/terrastackai/terratorch/tree/main/terratorch/models/backbones/terramind
+```
+
 # TerraMind
 
 TerraMind is the first any-to-any generative foundation model for Earth Observation, build by IBM, ESA Φ-lab, and the FAST-EO project.

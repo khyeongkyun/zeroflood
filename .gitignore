@@ -24,6 +24,12 @@ data/mados/splits/*
 .idea
 
 
+
 # Added ============
 __archive__/
 notebooks/*.png
+*.err
+*.out
+tmp*
+*.png
+*.pdf

@@ -5,7 +5,6 @@
 
 Updated
 - [2026-03-01] Paper was accepted at EUSAR 2026!
-- [2025-08-01] ZeroFlood was selected as a Winner of [TerraMind Blue-sky challenge](https://huggingface.co/spaces/ibm-esa-geospatial/challenge).
 
 ## Dataset
 

@@ -1,6 +1,7 @@
-# ZeroFlood: A Geospatial Foundation Model for Data-Efficient Flood Susceptibility Mapping
+# ZeroFlood: Flood Hazard Mapping from Single-Modality SAR Using Geo-Foundation Models
 
-🚧 Work in process 🚧
+![alt text](./assets/diagram-zeroflood.png)
+![alt text](./assets/pred_gt_tim_samples_small.png)
 
 Updated
 - [2026-03-01] Paper was accepted at EUSAR 2026!
@@ -25,7 +26,7 @@ $ python ./data/preprocess.py -s all -r /PATH/OF/DATASET/ROOT
 
 ### Setup
 
-Our fine-tuning process follows the [Pangaea benchmark](https://github.com/VMarsocci/pangaea-bench).
+Our fine-tuning process follows the [Pangaea benchmark](https://github.com/VMarsocci/pangaea-bench). Changes from the original source are described in [UPDATE.md](./UPDATE.md)
 
 To do so, install required packages in `environment.yaml`.
 
@@ -61,6 +62,16 @@ torchrun --nnodes=1 --nproc_per_node=1 pangaea/run.py \
 ```
 > [!TIP]
 > You can also find slurm bash scripts at `./script/pangaea-bench`.
+
+### Inference
+
+```
+torchrun --nnodes=1 --nproc_per_node=1 --master_port $MASTER_PORT \
+   pangaea/run.py \
+   --config-name=test \
+   ckpt_dir=$CKPT_DIR \
+   save_pred=true
+```
 
 ## Citation
 If you refer ZeroFlood in your research, please cite the ZeroFlood paper.

@@ -306,7 +306,7 @@ def get_s2_img(data: np.array):
     rgb = normalize(rgb,mean,std)
     return np.transpose(rgb, (1, 2, 0))
 
-def get_s1_img(data: np.array):
+def get_s1_img(data: np.array, scale=(1,1,1)):
     """
     Prepare S1 image for plotting.
     Normalize each band using mean and std from statistics.
@@ -319,22 +319,12 @@ def get_s1_img(data: np.array):
 
     r = img[0].astype(np.float32)
     g = img[1].astype(np.float32)
-
-    # Compute ratio, avoid division by zero
-    # ratio = np.where(g != 0, r / g, 0.0)
+    
     ratio = np.zeros_like(r)
     np.divide(r, g, out=ratio, where=g != 0)
+    b = normalize(np.expand_dims(ratio, axis=0), [np.mean(ratio)], [np.std(ratio)])[0].astype(np.float32)
 
-    # Normalize only the ratio channel to [0, 1]
-    vmin, vmax = ratio.min(), ratio.max()
-    blue = (ratio - vmin) / (vmax - vmin) if vmax - vmin != 0 else np.zeros_like(ratio)
-    b = (blue * 255).clip(0, 255)
-
-    return np.stack([r, g, b], axis=-1).astype(np.uint8) 
-    # # Normalize each band
-    # img = normalize(data,mean,std)
-    # print(img[1].shape)
-    # return img[1]
+    return np.stack([r*scale[0], g*scale[1], b*scale[2]], axis=-1).astype(np.uint8)
 
 def apply_mask_hatch(ax, img, hatch='....', color='#0000FF', alpha=0.4):
     """Overlay a hatch pattern on flood-risk pixels (value == 1)."""
@@ -524,7 +514,6 @@ def viz_sample_multimodel_keys(
             ax.set_title(title, fontsize=12,)
 
     if show_legend:
-
         if 'DEM' in title_lst:
             dem_idx = title_lst.index('DEM')
 
@@ -570,13 +559,18 @@ def viz_sample_multimodel_keys(
         patches = patches[2:] + [patches[1]] + [patches[0]] # Reorder 
         if 'LULC' not in modalities:
             patches = patches[-2:]
+            y_anchor = -0.012 * 10 / nrows  # scale vertical offset
+            ncol = len(patches)
+        else:
+            y_anchor = -0.023 * 10 / nrows  # scale vertical offset
+            ncol = 4
 
         fig.legend(
             handles=patches,
             loc='lower right',
-            bbox_to_anchor=(0.99, -.015),
+            bbox_to_anchor=(0.99, y_anchor),
             bbox_transform=fig.transFigure,  # ← relative to the whole figure
-            ncol=4,
+            ncol=ncol,
             fontsize=10,
             frameon=True,
         )
@@ -686,6 +680,7 @@ def viz_sample_keys(
             ax.set_title(title, fontsize=12,)
 
     if show_legend:
+
         if 'DEM' in title_lst:
             dem_idx = title_lst.index('DEM')
 
@@ -729,14 +724,19 @@ def viz_sample_keys(
         patches = hatch_patch + patches
         patches = patches[2:] + [patches[1]] + [patches[0]] # Reorder 
         if 'LULC' not in modalities:
-            patches = patches[-3:]
+            patches = patches[-2:]
+            y_anchor = -0.012 * 10 / nrows  # scale vertical offset
+            ncol = len(patches)
+        else:
+            y_anchor = -0.023 * 10 / nrows  # scale vertical offset
+            ncol = 4
 
         fig.legend(
             handles=patches,
             loc='lower right',
-            bbox_to_anchor=(0.99, -.025),
+            bbox_to_anchor=(0.99, y_anchor),
             bbox_transform=fig.transFigure,  # ← relative to the whole figure
-            ncol=4,
+            ncol=ncol,
             fontsize=10,
             frameon=True,
         )

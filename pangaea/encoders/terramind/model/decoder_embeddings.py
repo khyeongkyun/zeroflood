@@ -24,6 +24,7 @@ from einops import repeat
 
 from .tm_utils import build_1d_sincos_posemb, build_2d_sincos_posemb, pair, interpolate_pos_encoding
 
+
 class SequenceDecoderEmbedding(nn.Module):
     """Embedding module for sequence inputs, like captions or a sequence of objects.
 
@@ -153,6 +154,8 @@ class SequenceDecoderEmbedding(nn.Module):
         """
         logits = self.to_logits(x)
         return logits
+
+
 
 class ImageTokenDecoderEmbedding(nn.Module):
     """Embedding module for tokenized spatial inputs.
